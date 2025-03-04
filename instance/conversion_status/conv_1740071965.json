@@ -1,0 +1,22 @@
+{
+  "log": [
+    {
+      "time": "2025-02-20 09:19:25",
+      "status": "starting",
+      "message": "Initializing conversion process"
+    },
+    {
+      "time": "2025-02-20 09:19:25",
+      "status": "converting",
+      "message": "Starting conversion of eng_us_agile_template.docx"
+    },
+    {
+      "time": "2025-02-20 09:19:25",
+      "status": "error",
+      "message": "Error during conversion: (-2147221008, 'CoInitialize has not been called.', None, None)"
+    }
+  ],
+  "status": "error",
+  "last_message": "Error during conversion: (-2147221008, 'CoInitialize has not been called.', None, None)",
+  "last_updated": "2025-02-20 09:19:25"
+}
