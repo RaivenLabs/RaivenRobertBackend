@@ -7,6 +7,9 @@ import boto3
 import re
 import copy
 import psycopg2
+
+from flask import session 
+from datetime import date
 from psycopg2.extras import DictCursor
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -154,6 +157,43 @@ def slugify(text):
     # Remove leading/trailing underscores
     text = text.strip('_')
     return text
+
+
+def save_temp_file(file):
+    """Save an uploaded file to a temporary location and return the path"""
+    temp_dir = os.path.join(current_app.root_path, 'temp')
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_path = os.path.join(temp_dir, secure_filename(file.filename))
+    file.save(temp_path)
+    return temp_path
+
+def extract_initial_rate_batch():
+    """Simple placeholder function to extract rate items"""
+    # For testing, just return some dummy data
+    return [
+        {"jobCode": "B9071", "jobTitle": "Agile Lead 1", "rate": 155.00},
+        {"jobCode": "B9072", "jobTitle": "Agile Lead 2", "rate": 175.00},
+        {"jobCode": "B9073", "jobTitle": "Agile Lead 3", "rate": 190.00}
+    ]
+
+def estimate_total_entries():
+    """Simple placeholder function to estimate total entries"""
+    # For testing, just return a fixed number
+    return 100
+
+def extract_rate_batch(file_path, offset, batch_size):
+    """Simple placeholder function to extract a batch of rate items"""
+    # For testing, just return some dummy data based on offset
+    return [
+        {"roleTitle": f"Role {i+offset}", "rateType": "hourly", "rate": 150.00+i+offset, "location": "US"} 
+        for i in range(min(batch_size, 10))  # Return at most 10 items
+    ]
+
+
+
+
+
+
 
 def parse_claude_structured_response(response_text):
     """
@@ -792,3 +832,361 @@ GROUP: General
             cursor.close()
         if 'conn' in locals():
             conn.close()
+
+
+
+
+@schema_blueprint.route('/extract-document-data', methods=['POST'])
+def extract_document_data():
+    """Extract key information from uploaded supplier documents"""
+    try:
+        print("\n====== EXTRACT DOCUMENT DATA ENDPOINT CALLED ======")
+        
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+            
+        file = request.files['file']
+        document_type = request.form.get('documentType', 'unknown')
+        
+        print(f"[extract] Processing {document_type} document: {file.filename}")
+        
+        # Save the file temporarily
+        temp_dir = os.path.join(current_app.root_path, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_path = os.path.join(temp_dir, secure_filename(file.filename))
+        file.save(temp_path)
+        
+        # Extract text from the document
+        file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+        document_text = ""
+        
+        if file_ext == 'pdf':
+            document_text = extract_text_from_file(temp_path, file_ext)
+        elif file_ext == 'csv':
+            document_text = parse_csv(temp_path)
+        elif file_ext in ['xlsx', 'xls']:
+            document_text = parse_excel(temp_path)
+        else:
+            # Read as text file
+            with open(temp_path, 'r', encoding='utf-8', errors='replace') as f:
+                document_text = f.read()
+        
+        print(f"[extract] Extracted {len(document_text)} characters from document")
+        
+        # Create a document-specific prompt based on document type
+        prompt = get_document_extraction_prompt(document_type, document_text)
+        
+        # Call Claude to extract information
+        response = anthropic_client.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=4096,
+            temperature=0.0,  # Use 0 for deterministic extraction
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # Parse Claude's response
+        extracted_data = parse_extraction_response(response.content[0].text)
+        print(f"[extract] Extracted data: {json.dumps(extracted_data, indent=2)}")
+        
+        # Clean up temp file
+        os.remove(temp_path)
+        
+        print("====== EXTRACT DOCUMENT DATA ENDPOINT COMPLETE ======\n")
+        return jsonify(extracted_data)
+        
+    except Exception as e:
+        import traceback
+        print("\n====== ERROR IN EXTRACT DOCUMENT DATA ENDPOINT ======")
+        print(f"Exception: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        print("=========================================\n")
+        
+        return jsonify({"error": f"Error extracting document data: {str(e)}"}), 500
+
+def get_document_extraction_prompt(document_type, document_text):
+    """Generate a prompt for extracting data based on document type"""
+    base_prompt = """
+You are an expert at extracting information from legal and business documents.
+Please extract the following key information from this {document_type} document.
+Return ONLY a valid JSON object with the extracted information - no other explanation or text.
+
+{extraction_fields}
+
+Here is the document content:
+{document_text}
+"""
+    
+    # Define extraction fields based on document type
+    if document_type == 'masterAgreement':
+        extraction_fields = """
+Extract these fields (return null if not found):
+- name: The supplier/vendor company name
+- msaReference: The MSA reference or contract number
+- agreementType: The type of agreement (e.g., "Fixed Term", "Evergreen", "Time & Materials")
+- effectiveDate: The effective date in YYYY-MM-DD format
+- termEndDate: The end date in YYYY-MM-DD format (null if not specified or evergreen)
+- autoRenewal: Boolean indicating if the agreement auto-renews
+- address: The supplier's address
+- website: The supplier's website
+- contacts: An array of contact persons with name, role, email, and phone if available
+- serviceCategories: Categories of services offered
+"""
+    elif document_type == 'rateCard':
+        extraction_fields = """
+Extract these fields (return null if not found):
+- effectiveDate: The rate card effective date in YYYY-MM-DD format
+- expirationDate: The rate card expiration date in YYYY-MM-DD format
+- currency: The currency used for rates
+- rateItems: An array of rate items, each containing:
+  * roleTitle: The job title or role
+  * rateType: The type of rate (hourly, daily, etc.)
+  * rate: The numeric rate amount
+  * location: The work location if specified
+  * level: The seniority level if specified
+"""
+    elif document_type in ['amendments', 'localCountryAgreements', 'orderTemplates']:
+        extraction_fields = """
+Extract these fields (return null if not found):
+- documentTitle: The title of the document
+- effectiveDate: The effective date in YYYY-MM-DD format
+- referenceNumber: Any reference number for this document
+- relatedDocuments: Any references to other documents (MSA number, etc.)
+- keyChanges: A summary of key changes or terms introduced by this document
+"""
+
+    elif document_type == 'serviceOrders':
+        extraction_fields = """
+Extract these fields (return null if not found):
+- orderNumber: The service order number or reference
+- msaReference: The reference or agreement number of the master agreement this order falls under
+- msaName: The complete name/title of the master agreement (e.g., "Master Professional Services Agreement")
+- msaEffectiveDate: The date of the master agreement in YYYY-MM-DD format
+- purchaser: The full legal name of the client/purchaser
+- contractor: The full legal name of the service provider/contractor
+- projectName: The name or title of the project or service
+- projectDescription: A brief description of the project scope
+- effectiveDate: The order start date in YYYY-MM-DD format
+- completionDate: The order end date in YYYY-MM-DD format
+- totalValue: The total monetary value of the order (numeric value only)
+- currency: The currency used for the order value
+- serviceCategories: An array of categories of services provided in this order
+- resourceTypes: An array of types of resources/roles utilized in this order
+- deliverables: An array of key deliverables specified in the order
+- specialTerms: Any special terms or conditions specific to this order
+- purchaserAddress: The address of the purchaser
+- contractorAddress: The address of the contractor
+- purchaserContact: Name and contact information of the purchaser's representative
+- contractorContact: Name and contact information of the contractor's representative
+
+Pay special attention to the master agreement details. Look for the full formal name of the master agreement, which is typically mentioned in phrases like "subject to the terms of the [FULL AGREEMENT NAME] between Purchaser and Contractor dated [DATE]". The msaName should include the complete title of the agreement (e.g., "Master Professional Services Agreement" or "Master Consulting Agreement").
+"""
+
+    else:
+        extraction_fields = """
+Extract any key information you can find, including:
+- dates: Any important dates in YYYY-MM-DD format
+- parties: Names of organizations involved
+- references: Any contract or document references
+- amounts: Any monetary amounts mentioned
+- terms: Key terms or conditions
+"""
+
+
+    
+    # Limit document text to avoid token limits
+    max_text_length = 50000
+    if len(document_text) > max_text_length:
+        document_text = document_text[:max_text_length] + "... [document truncated]"
+    
+    return base_prompt.format(
+        document_type=document_type,
+        extraction_fields=extraction_fields,
+        document_text=document_text
+    )
+
+def parse_extraction_response(response_text):
+    """Parse Claude's JSON response safely"""
+    try:
+        # Find JSON object in response text
+        json_pattern = r'```json\s*([\s\S]*?)\s*```'
+        json_match = re.search(json_pattern, response_text)
+        
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # If no code block, try to find JSON directly
+            # Look for the first { and the last }
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}')
+            
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx+1]
+            else:
+                print("[parse_extraction] No JSON object found in response")
+                return {}
+        
+        return json.loads(json_str)
+    except Exception as e:
+        print(f"[parse_extraction] Error parsing JSON response: {str(e)}")
+        print(f"[parse_extraction] Raw response: {response_text}")
+        # Return empty dict rather than fail
+        return {}
+    
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+@schema_blueprint.route('/extract-rate-card', methods=['POST'])
+def extract_rate_card():
+    """Extract and preview rate card data from uploaded file"""
+    try:
+        print("\n====== EXTRACT RATE CARD ENDPOINT CALLED ======")
+        
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+            
+        file = request.files['file']
+        card_type = request.form.get('cardType', 'standalone')
+        provider_id = request.form.get('providerId', 'new')
+        
+        print(f"[extract_rate_card] Processing {card_type} rate card: {file.filename}")
+        
+        # Save the file temporarily
+        temp_path = save_temp_file(file)
+        
+        # Extract text based on file type
+        file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+        
+        # Process initial batch of rate items based on file type and card type
+        try:
+            initial_rates = extract_initial_rate_batch()
+            estimated_total = estimate_total_entries()
+            
+            print(f"[extract_rate_card] Extracted {len(initial_rates)} rate items (estimated total: {estimated_total})")
+        except Exception as e:
+            print(f"[extract_rate_card] Error extracting rate items: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            initial_rates = []
+            estimated_total = 0
+        
+        # Store file path in session for later processing
+        session['pending_rate_card'] = {
+            'file_path': temp_path,
+            'file_ext': file_ext,
+            'card_type': card_type,
+            'processed': False,
+            'provider_id': provider_id
+        }
+        
+        print("====== EXTRACT RATE CARD ENDPOINT COMPLETE ======\n")
+        return jsonify({
+            'previewItems': initial_rates,
+            'estimatedTotal': estimated_total
+        })
+        
+    except Exception as e:
+        import traceback
+        print("\n====== ERROR IN EXTRACT RATE CARD ENDPOINT ======")
+        print(f"Exception: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        print("=========================================\n")
+        
+        return jsonify({"error": f"Error extracting rate card: {str(e)}"}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@schema_blueprint.route('/process-complete-rate-card', methods=['POST'])
+def process_complete_rate_card():
+    # Get the pending rate card info
+    if 'pending_rate_card' not in session:
+        return jsonify({'error': 'No pending rate card to process'}), 400
+            
+    pending_info = session['pending_rate_card']
+    
+    # Process the entire file and store directly to database
+    provider_id = pending_info['provider_id']
+    file_path = pending_info['file_path']
+        
+    # Create rate card header
+    conn = get_db_connection()  # Get a new connection
+    if not conn:
+        return jsonify({'error': 'Unable to connect to database'}), 500
+    
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            INSERT INTO rate_cards (provider_id, effective_date, name)
+            VALUES (%s, %s, %s) RETURNING id
+        """, (provider_id, date.today(), "Extracted Rate Card"))
+        rate_card_id = cursor.fetchone()[0]
+        
+        # Process the file in batches
+        batch_size = 50
+        offset = 0
+        total_processed = 0
+        
+        while True:
+            # Extract the next batch
+            batch = extract_rate_batch(file_path, offset, batch_size)
+            if not batch:
+                break  # No more items to process
+                    
+            # Insert batch into database
+            for item in batch:
+                cursor.execute("""
+                    INSERT INTO rate_card_items (rate_card_id, role_title, rate_type, rate, location)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (rate_card_id, item['roleTitle'], item['rateType'], item['rate'], item['location']))
+                    
+            conn.commit()
+            total_processed += len(batch)
+            offset += batch_size
+        
+        # Clean up
+        os.remove(file_path)
+        session.pop('pending_rate_card', None)
+        
+        return jsonify({
+            'success': True,
+            'rateCardId': rate_card_id,
+            'totalProcessed': total_processed
+        })
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()

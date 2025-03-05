@@ -6,6 +6,10 @@ import PyPDF2
 import json
 import re
 
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+
+
 def extract_text_from_file(file_path, file_extension):
     """
     Extract text content from various file types
