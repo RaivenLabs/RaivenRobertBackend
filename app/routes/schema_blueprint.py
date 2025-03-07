@@ -7,14 +7,39 @@ import boto3
 import re
 import copy
 import psycopg2
+import PyPDF2
+import re
+import tempfile
+import traceback
+
+
+
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+
+
 
 from flask import session 
+import datetime
 from datetime import date
 from psycopg2.extras import DictCursor
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 from ..utilities.document_processor import extract_text_from_file, parse_csv, parse_excel
 from ..utilities.schema_generator import generate_initial_schema, convert_to_sql, convert_to_json_schema
+
+
+
+
+# Define pandas_available and handle imports with try/except
+try:
+    import pandas as pd
+    import numpy as np
+    pandas_available = True
+except ImportError:
+    pandas_available = False
+    print("Warning: pandas is not installed. Excel and CSV processing will not work.")
+
 
 # Use the existing Anthropic client from main_blueprint
 from .main_routes import anthropic_client
@@ -159,13 +184,553 @@ def slugify(text):
     return text
 
 
+
+
+
+
+
+
 def save_temp_file(file):
-    """Save an uploaded file to a temporary location and return the path"""
-    temp_dir = os.path.join(current_app.root_path, 'temp')
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, secure_filename(file.filename))
-    file.save(temp_path)
-    return temp_path
+    """Save uploaded file to a temporary location and return the path"""
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    file.save(temp_file.name)
+    return temp_file.name
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def extract_rates_from_amendment_pdf(pdf_path, max_items=500):
+    """Extract rate card data from a PDF amendment using AI assistance"""
+    try:
+        import PyPDF2
+        
+        print(f"[extract_rates_from_amendment_pdf] Processing PDF: {pdf_path}")
+        
+        # 1. Read the PDF content
+        pdf_reader = PyPDF2.PdfReader(pdf_path)
+        pdf_text = ""
+        
+        # Extract text from all pages
+        for page_num in range(len(pdf_reader.pages)):
+            page_text = pdf_reader.pages[page_num].extract_text()
+            pdf_text += f"\n\n--- PAGE {page_num + 1} ---\n\n{page_text}"
+        
+        # 2. Prepare prompt for Claude to extract the rate table
+        prompt = f"""
+You are a specialized data extraction assistant focused on extracting rate card tables from contract amendments.
+
+I need you to extract the rate card table data from the following PDF content. This is from a contract amendment between NIKE and a consulting firm.
+
+Look for sections titled "Exhibit B-1", "CONTRACTOR'S RATES", or similar. The table will have columns like Beeline Job Code, Job Title, and various regional bill rates.
+
+Extract all rows from the rate card table and return them in a structured format.
+
+Return your response as a JSON object with the following structure:
+{{
+  "rateItems": [
+    {{
+      // Include fields for EVERY column found in the rate table
+      // The below are just examples - use the actual column names from the document
+      // Convert column names to camelCase or snake_case for consistency
+      "job_code": "B9071",  // or whatever field contains the job/role code
+      "job_title": "Agile Lead 1",  // or whatever field contains the job/role title
+      "us_region1_rate": 155.00,  // Numeric values should be actual numbers, not strings with $ signs
+      // Include ALL other rate columns found in the table
+    }},
+    // Include ALL rows from the rate table
+  ],
+  "totalCount": 123,  // Total number of rate items found
+  "columnInfo": [
+    // Include an entry for EVERY column found in the rate table
+    {{
+      "original_name": "The exact column name as it appears in the document",
+      "sql_column": "a_valid_sql_column_name",  // Convert to snake_case with only alphanumeric and underscore
+      "sql_type": "TEXT",  // Use "TEXT", "NUMERIC(15,2)", or "DATE" as appropriate
+      "mapping": "job_code"  // A suggested standard mapping if this appears to be a common field
+    }},
+    // One entry for each column
+  ]
+}}
+
+IMPORTANT: 
+1. Your response structure should ADAPT to match ALL columns found in the actual document
+2. Do NOT limit yourself to just the example fields shown above
+3. Include ALL rows from the rate table in your response
+4. Make sure numeric values are actual numbers, not strings with currency symbols
+5. For "sql_column", ensure names are valid for SQL (letters, numbers, underscores only)
+6. If a value contains a dollar sign ($), remove it and convert to a numeric value
+
+Here is the extracted PDF content:
+
+{pdf_text[:50000]}  # Truncate if needed
+"""
+        
+        print("[extract_rates_from_amendment_pdf] Calling Claude to extract rate table")
+        
+        # 3. Call Claude to extract the rate table
+        response = anthropic_client.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=52000,  # Large max_tokens to handle many rate items
+            temperature=0.0,    # Use 0 for deterministic extraction
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # 4. Parse Claude's response
+        extraction_result = {}
+        try:
+            # Extract the JSON response
+            response_text = response.content[0].text
+            
+            # Look for JSON block
+            import re
+            import json
+            
+            json_pattern = r'```json\s*([\s\S]*?)\s*```'
+            json_match = re.search(json_pattern, response_text)
+            
+            if json_match:
+                extraction_result = json.loads(json_match.group(1))
+            else:
+                # Try to extract JSON directly if no code block
+                json_start = response_text.find('{')
+                json_end = response_text.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    extraction_result = json.loads(response_text[json_start:json_end])
+                else:
+                    print("[extract_rates_from_amendment_pdf] Failed to extract JSON from Claude response")
+        except Exception as e:
+            print(f"[extract_rates_from_amendment_pdf] Error parsing Claude response: {str(e)}")
+            traceback.print_exc()
+            return [], 0, []
+        
+        # 5. Extract rate items and column info
+        rate_items = extraction_result.get('rateItems', [])
+        total_count = extraction_result.get('totalCount', len(rate_items))
+        column_info = extraction_result.get('columnInfo', [])
+        
+        # Limit the number of preview items if needed
+        preview_items = rate_items[:max_items]
+        
+        print(f"[extract_rates_from_amendment_pdf] Extracted {len(preview_items)} preview items out of {total_count} total")
+        
+        # 6. Print sample rows for verification
+        print("\n==== CONFIRMING EXTRACTION BY CLAUDETTE! ====")
+     
+        
+        print("Yay:)")
+        
+        # Add this after line 71 (after parsing the JSON response)
+        print("\n==== SAMPLE EXTRACTED ROLES FROM CLAUDE ====")
+        if 'rateItems' in extraction_result and len(extraction_result['rateItems']) > 0:
+            # Display up to 3 sample roles (or fewer if less are available)
+            sample_count = min(3, len(extraction_result['rateItems']))
+            for i in range(sample_count):
+                role = extraction_result['rateItems'][i]
+                print(f"\nROLE {i+1}:")
+                # Display the role information in a readable format
+                for key, value in role.items():
+                    print(f"  {key}: {value}")
+        else:
+            print("No roles were extracted")
+       
+        print(preview_items)
+        print("============================================\n")
+        
+        return preview_items, total_count, column_info
+        
+    except Exception as e:
+        print(f"Error extracting rates from PDF: {str(e)}")
+        traceback.print_exc()
+        return [], 0, []
+
+
+
+
+
+
+
+
+
+
+
+
+
+def extract_document_info(pdf_path):
+    """Extract relationship data and supplier details from a PDF document using AI assistance"""
+    try:
+        import PyPDF2
+        
+        print(f"[extract_document_info] Processing PDF: {pdf_path}")
+        
+        # 1. Read the PDF content
+        pdf_reader = PyPDF2.PdfReader(pdf_path)
+        pdf_text = ""
+        
+        # Extract text from all pages
+        for page_num in range(len(pdf_reader.pages)):
+            page_text = pdf_reader.pages[page_num].extract_text()
+            pdf_text += f"\n\n--- PAGE {page_num + 1} ---\n\n{page_text}"
+        
+        # 2. Prepare prompt for Claude to extract the document info
+        prompt = f"""
+You are a specialized data extraction assistant for contract documents.
+
+I need you to extract key information from the following document. This appears to be a contract, amendment, or related document.
+
+Extract the following information and return it in a structured JSON format:
+
+1. Document Relationship Information:
+   - Master Agreement details (name, reference number, effective date, expiration date)
+   - Amendment details (if present: name, reference number, effective date)
+   - Rate Card details (if mentioned: name, effective date, expiration date)
+   - Provider/Contractor information (name, address)
+
+2. Supplier Details:
+   - Company name
+   - Category (if available)
+   - Contact name (if available)
+   - Contact email (if available)
+   - Contact phone (if available)
+   - Website (if available)
+
+Return your response as a JSON object with the following structure:
+{{
+  "documentInfo": {{
+    "masterAgreement": {{
+      "name": "Master Professional Services Agreement",
+      "referenceNumber": "K-123456",
+      "effectiveDate": "2023-01-01",
+      "expirationDate": "2025-01-01"
+    }},
+    "amendment": {{
+      "name": "Third Amendment to Master Professional Services Agreement",
+      "referenceNumber": "K-123456",
+      "effectiveDate": "2024-06-01"
+    }},
+    "rateCard": {{
+      "name": "Exhibit B-1 - Contractor's Rates",
+      "effectiveDate": "2024-06-01",
+      "expirationDate": "2027-05-30"
+    }},
+    "provider": {{
+      "name": "Acme Consulting Group LLC",
+      "address": "123 Business Ave, Suite 100, Portland, OR 97123, United States of America"
+    }}
+  }},
+  "supplierDetails": {{
+    "name": "Acme Consulting Group LLC",
+    "category": "Consulting",
+    "contactName": "John Smith",
+    "contactEmail": "john.smith@acme.com",
+    "contactPhone": "555-123-4567",
+    "website": "https://acme.com"
+  }}
+}}
+
+Include only fields for which you can find information in the document. For dates, use the YYYY-MM-DD format. If information is not found, omit that field.
+
+Here is the extracted PDF content:
+
+{pdf_text[:50000]}  # Truncate if needed
+"""
+        
+        print("[extract_document_info] Calling Claude to extract document information")
+        
+        # 3. Call Claude to extract the information
+        response = anthropic_client.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=10000,
+            temperature=0.0,    # Use 0 for deterministic extraction
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # 4. Parse Claude's response
+        extraction_result = {}
+        try:
+            # Extract the JSON response
+            response_text = response.content[0].text
+            
+            # Look for JSON block
+            import re
+            import json
+            
+            json_pattern = r'```json\s*([\s\S]*?)\s*```'
+            json_match = re.search(json_pattern, response_text)
+            
+            if json_match:
+                extraction_result = json.loads(json_match.group(1))
+            else:
+                # Try to extract JSON directly if no code block
+                json_start = response_text.find('{')
+                json_end = response_text.rfind('}') + 1
+                if json_start >= 0 and json_end > json_start:
+                    extraction_result = json.loads(response_text[json_start:json_end])
+                else:
+                    print("[extract_document_info] Failed to extract JSON from Claude response")
+        except Exception as e:
+            print(f"[extract_document_info] Error parsing Claude response: {str(e)}")
+            traceback.print_exc()
+            return {}, {}
+        
+        # 5. Extract document info and supplier details
+        document_info = extraction_result.get('documentInfo', {})
+        supplier_details = extraction_result.get('supplierDetails', {})
+        
+        # 6. Print extracted information for verification
+        print("\n==== EXTRACTED DOCUMENT INFORMATION ====")
+        print(json.dumps(document_info, indent=2))
+        print("\n==== EXTRACTED SUPPLIER DETAILS ====")
+        print(json.dumps(supplier_details, indent=2))
+        print("=======================================\n")
+        
+        return document_info, supplier_details
+        
+    except Exception as e:
+        print(f"Error extracting document information: {str(e)}")
+        traceback.print_exc()
+        return {}, {}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def extract_rates_from_excel(excel_path, sheet_name=None, max_items=100):
+    """Extract rates from an Excel file using heuristics to find the header row"""
+    if not pandas_available:
+        print("[extract_rates_from_excel] Pandas not available")
+        return [], 0, []
+        
+    try:
+        # If we don't have explicit guidance, use hardcoded values for your specific file
+        if sheet_name is None:
+            sheet_name = "Rate Card"  # Hardcoded sheet name
+            
+        print(f"[extract_rates_from_excel] Using sheet: {sheet_name}")
+        
+        # Get available sheets for debugging
+        xls = pd.ExcelFile(excel_path)
+        print(f"[extract_rates_from_excel] Available sheets: {xls.sheet_names}")
+        
+        # Read the Excel file with specified sheet
+        df = pd.read_excel(excel_path, sheet_name=sheet_name)
+        print(f"[extract_rates_from_excel] Read dataframe with shape: {df.shape}")
+        
+        # Find the header row using heuristics
+        header_row = 0
+        for i in range(min(20, len(df))):  # Check first 20 rows
+            row_values = [str(val).lower() for val in df.iloc[i].values if pd.notna(val)]
+            
+            # Look for indicators of a header row: role + (level or region or usd)
+            if 'role' in row_values and any(term in ' '.join(row_values) for term in ['level', 'region', 'usd']):
+                header_row = i
+                print(f"[extract_rates_from_excel] Found header row at index {header_row}")
+                break
+                
+        # Use the header row as column names
+        print(f"[extract_rates_from_excel] Using row {header_row} as header row")
+        headers = df.iloc[header_row]
+        df = pd.DataFrame(df.values[header_row+1:], columns=headers)
+        print(f"[extract_rates_from_excel] After header adjustment, shape: {df.shape}")
+        
+        # Clean column names and continue processing as before...
+        df.columns = [str(col).strip() if pd.notna(col) else f"column_{i}" 
+                     for i, col in enumerate(df.columns)]
+        
+        # Drop empty rows
+        df = df.dropna(how='all')
+        print(f"[extract_rates_from_excel] After dropping empty rows, shape: {df.shape}")
+        
+        # Generate column info for database table creation
+        column_info = []
+        for i, column in enumerate(df.columns):
+            col_name = str(column).strip() if pd.notna(column) else f"column_{i}"
+            if not col_name:
+                col_name = f"column_{i}"
+                
+            # Sanitize for SQL
+            sql_column = re.sub(r'[^\w]', '_', col_name.lower()).strip('_')
+            if not sql_column:
+                sql_column = f"column_{i}"
+                
+            # Ensure uniqueness
+            base_name = sql_column
+            counter = 1
+            while any(info['sql_column'] == sql_column for info in column_info):
+                sql_column = f"{base_name}_{counter}"
+                counter += 1
+            
+            # Determine data type
+            sql_type = 'TEXT'  # Default
+            sample_values = df[column].dropna().head(5).values.tolist() if len(df[column].dropna()) > 0 else []
+            if sample_values:
+                if all(isinstance(val, (int, np.integer)) for val in sample_values if pd.notna(val)):
+                    sql_type = 'INTEGER'
+                elif all(isinstance(val, (float, np.floating, int, np.integer)) for val in sample_values if pd.notna(val)):
+                    sql_type = 'NUMERIC(15,2)'
+                elif all(isinstance(val, (datetime.date, datetime.datetime)) for val in sample_values if pd.notna(val)):
+                    sql_type = 'DATE'
+            
+            column_info.append({
+                'original_name': col_name,
+                'sql_column': sql_column,
+                'sql_type': sql_type
+            })
+        
+        print(f"[extract_rates_from_excel] Generated {len(column_info)} column definitions")
+        
+        # Process rows into rate items
+        rate_items = []
+        preview_count = min(max_items, len(df))
+        
+        for i in range(preview_count):
+            if i >= len(df):
+                break
+                
+            row = df.iloc[i]
+            
+            # Skip empty rows
+            if all(pd.isna(val) or str(val).strip() == '' for val in row):
+                continue
+                
+            # Create rate item
+            rate_item = {}
+            for j, col in enumerate(df.columns):
+                if j >= len(column_info):
+                    continue  # Skip if column_info is missing
+                    
+                col_name = column_info[j]['original_name']
+                value = row.iloc[j] if j < len(row) else None
+                
+                # Handle different data types
+                if pd.isna(value):
+                    rate_item[col_name] = None
+                elif isinstance(value, (int, np.integer)):
+                    rate_item[col_name] = int(value)
+                elif isinstance(value, (float, np.floating)):
+                    rate_item[col_name] = float(value)
+                elif isinstance(value, (datetime.date, datetime.datetime)):
+                    rate_item[col_name] = value.isoformat()
+                else:
+                    rate_item[col_name] = str(value).strip()
+            
+            rate_items.append(rate_item)
+            
+        print(f"[extract_rates_from_excel] Processed {len(rate_items)} preview items")
+        return rate_items, len(df), column_info
+        
+    except Exception as e:
+        print(f"Error processing Excel file: {str(e)}")
+        traceback.print_exc()
+        return [], 0, []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def extract_rates_from_csv(csv_path, max_items=100):
+    """Extract rates from a CSV file"""
+    # Placeholder for CSV extraction logic
+    import pandas as pd
+    
+    try:
+        df = pd.read_csv(csv_path)
+        # Assuming the CSV file has columns that correspond to our rate structure
+        rate_items = []
+        
+        for i, row in df.head(max_items).iterrows():
+            # Adapt this to match your CSV structure
+            rate_item = {
+                'role_code': str(row.get('Beeline Job Code', '')),
+                'role_title': str(row.get('Beeline Job Title (with Level)', '')),
+                'us_region1_rate': float(row.get('US Region 1 Bill Rate (USD)', 0)),
+                'us_region2_rate': float(row.get('US Region 2 Bill Rate (USD)', 0)),
+                'us_region3_rate': float(row.get('US Region 3 Bill Rate (USD)', 0)),
+                # Add other rates as needed
+            }
+            rate_items.append(rate_item)
+            
+        return rate_items, len(df)
+    except Exception as e:
+        print(f"Error processing CSV file: {str(e)}")
+        return [], 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def extract_initial_rate_batch():
     """Simple placeholder function to extract rate items"""
@@ -838,7 +1403,7 @@ GROUP: General
 
 @schema_blueprint.route('/extract-document-data', methods=['POST'])
 def extract_document_data():
-    """Extract key information from uploaded supplier documents"""
+    """Extract detailed structured information from any uploaded document"""
     try:
         print("\n====== EXTRACT DOCUMENT DATA ENDPOINT CALLED ======")
         
@@ -847,9 +1412,8 @@ def extract_document_data():
             return jsonify({"error": "No file uploaded"}), 400
             
         file = request.files['file']
-        document_type = request.form.get('documentType', 'unknown')
         
-        print(f"[extract] Processing {document_type} document: {file.filename}")
+        print(f"[extract] Processing document: {file.filename}")
         
         # Save the file temporarily
         temp_dir = os.path.join(current_app.root_path, 'temp')
@@ -874,13 +1438,87 @@ def extract_document_data():
         
         print(f"[extract] Extracted {len(document_text)} characters from document")
         
-        # Create a document-specific prompt based on document type
-        prompt = get_document_extraction_prompt(document_type, document_text)
+        # Detailed extraction prompt
+        prompt = f"""
+You are an expert at extracting information from legal and business documents.
+Please extract ALL of the following key information from this document.
+Return ONLY a valid JSON object with the extracted information - no other explanation or text.
+
+Extract all of these fields (include null if not found):
+
+# Provider/Supplier Information
+- name: The supplier/vendor company name
+- address: The supplier's address
+- website: The supplier's website
+- contacts: An array of contact persons with name, role, email, and phone if available
+
+# Master Agreement Information
+- CLMReference: The CLM reference or contract number
+- msaName: The complete name/title of the master agreement (e.g., "Master Professional Services Agreement")
+- agreementType: The type of agreement (e.g., "Fixed Term", "Evergreen", "Time & Materials")
+- effectiveDate: The effective date in YYYY-MM-DD format
+- termEndDate: The end date in YYYY-MM-DD format (null if not specified or evergreen)
+- autoRenewal: Boolean indicating if the agreement auto-renews
+- serviceCategories: Categories of services offered
+
+# Amendment Information (if applicable)
+- amendmentNumber: The amendment number (e.g., "First Amendment", "Third Amendment")
+- amendmentEffectiveDate: The amendment effective date in YYYY-MM-DD format
+- amendmentReferenceNumber: Any CLM reference number for this amendment
+- keyChanges: A summary of key changes introduced by this amendment
+
+# Rate Card Information (if applicable)
+- rateCardEffectiveDate: The rate card effective date in YYYY-MM-DD format
+- rateCardExpirationDate: The rate card expiration date in YYYY-MM-DD format
+- currency: The currency used for rates
+- CLMReferenceNumber: Any CLM reference number for a rate card amendment
+- rateItems: An array of rate items with any available information such as:
+  * jobCode: The job code (e.g., "B9071")
+  * roleTitle: The job title or role (e.g., "Agile Lead 1")
+  * rateType: The type of rate (hourly, daily, etc.)
+  * rate: The numeric rate amount
+  * location: The work location if specified (e.g., "US Region 1")
+  * level: The seniority level if specified
+
+# Service Order Information (if applicable)
+- orderNumber: The service order number or reference
+- projectName: The name or title of the project or service
+- projectDescription: A brief description of the project scope
+- CLMReferenceNumber: Any CLM reference number for this service order
+- orderEffectiveDate: The order start date in YYYY-MM-DD format
+- orderCompletionDate: The order end date in YYYY-MM-DD format
+- totalValue: The total monetary value of the order (numeric value only)
+- orderCurrency: The currency used for the order value
+- deliverables: An array of key deliverables specified in the order
+- specialTerms: Any special terms or conditions specific to this order
+- purchaser: The client/customer name
+- purchaserAddress: The address of the purchaser
+- purchaserContact: Name and contact information of the purchaser's representative
+
+# General Information
+- documentTitle: The title of the document
+- documentType: The type of document (e.g., "Master Agreement", "Amendment", "Rate Card", "Service Order")
+- parties: Names of all organizations involved
+- signatures: An array of signatories with name, title, organization, and date if available
+- references: Any contract or document references mentioned
+- importantDates: Any other important dates in YYYY-MM-DD format with description
+- importantAmounts: Any monetary amounts mentioned with description
+
+Pay special attention to:
+1. The relationships between documents - look for references to other agreements
+2. Terms that indicate effective dates, expiration dates, or renewal terms
+3. Complete names and reference numbers of agreements
+4. Rate information if present, especially looking for tables with job titles and rates
+5. Any tables, headers, or structured data that might contain key information
+
+Here is the document content:
+{document_text}
+"""
         
         # Call Claude to extract information
         response = anthropic_client.messages.create(
             model="claude-3-7-sonnet-20250219",
-            max_tokens=4096,
+            max_tokens=10000,
             temperature=0.0,  # Use 0 for deterministic extraction
             messages=[
                 {"role": "user", "content": prompt}
@@ -889,12 +1527,15 @@ def extract_document_data():
         
         # Parse Claude's response
         extracted_data = parse_extraction_response(response.content[0].text)
-        print(f"[extract] Extracted data: {json.dumps(extracted_data, indent=2)}")
+        
+        # Print extracted data to terminal in a readable format
+        print("\n====== DOCUMENT EXTRACTION RESULTS ======")
+        print(json.dumps(extracted_data, indent=2))
+        print("=======================================\n")
         
         # Clean up temp file
         os.remove(temp_path)
         
-        print("====== EXTRACT DOCUMENT DATA ENDPOINT COMPLETE ======\n")
         return jsonify(extracted_data)
         
     except Exception as e:
@@ -906,146 +1547,31 @@ def extract_document_data():
         
         return jsonify({"error": f"Error extracting document data: {str(e)}"}), 500
 
-def get_document_extraction_prompt(document_type, document_text):
-    """Generate a prompt for extracting data based on document type"""
-    base_prompt = """
-You are an expert at extracting information from legal and business documents.
-Please extract the following key information from this {document_type} document.
-Return ONLY a valid JSON object with the extracted information - no other explanation or text.
-
-{extraction_fields}
-
-Here is the document content:
-{document_text}
-"""
-    
-    # Define extraction fields based on document type
-    if document_type == 'masterAgreement':
-        extraction_fields = """
-Extract these fields (return null if not found):
-- name: The supplier/vendor company name
-- msaReference: The MSA reference or contract number
-- agreementType: The type of agreement (e.g., "Fixed Term", "Evergreen", "Time & Materials")
-- effectiveDate: The effective date in YYYY-MM-DD format
-- termEndDate: The end date in YYYY-MM-DD format (null if not specified or evergreen)
-- autoRenewal: Boolean indicating if the agreement auto-renews
-- address: The supplier's address
-- website: The supplier's website
-- contacts: An array of contact persons with name, role, email, and phone if available
-- serviceCategories: Categories of services offered
-"""
-    elif document_type == 'rateCard':
-        extraction_fields = """
-Extract these fields (return null if not found):
-- effectiveDate: The rate card effective date in YYYY-MM-DD format
-- expirationDate: The rate card expiration date in YYYY-MM-DD format
-- currency: The currency used for rates
-- rateItems: An array of rate items, each containing:
-  * roleTitle: The job title or role
-  * rateType: The type of rate (hourly, daily, etc.)
-  * rate: The numeric rate amount
-  * location: The work location if specified
-  * level: The seniority level if specified
-"""
-    elif document_type in ['amendments', 'localCountryAgreements', 'orderTemplates']:
-        extraction_fields = """
-Extract these fields (return null if not found):
-- documentTitle: The title of the document
-- effectiveDate: The effective date in YYYY-MM-DD format
-- referenceNumber: Any reference number for this document
-- relatedDocuments: Any references to other documents (MSA number, etc.)
-- keyChanges: A summary of key changes or terms introduced by this document
-"""
-
-    elif document_type == 'serviceOrders':
-        extraction_fields = """
-Extract these fields (return null if not found):
-- orderNumber: The service order number or reference
-- msaReference: The reference or agreement number of the master agreement this order falls under
-- msaName: The complete name/title of the master agreement (e.g., "Master Professional Services Agreement")
-- msaEffectiveDate: The date of the master agreement in YYYY-MM-DD format
-- purchaser: The full legal name of the client/purchaser
-- contractor: The full legal name of the service provider/contractor
-- projectName: The name or title of the project or service
-- projectDescription: A brief description of the project scope
-- effectiveDate: The order start date in YYYY-MM-DD format
-- completionDate: The order end date in YYYY-MM-DD format
-- totalValue: The total monetary value of the order (numeric value only)
-- currency: The currency used for the order value
-- serviceCategories: An array of categories of services provided in this order
-- resourceTypes: An array of types of resources/roles utilized in this order
-- deliverables: An array of key deliverables specified in the order
-- specialTerms: Any special terms or conditions specific to this order
-- purchaserAddress: The address of the purchaser
-- contractorAddress: The address of the contractor
-- purchaserContact: Name and contact information of the purchaser's representative
-- contractorContact: Name and contact information of the contractor's representative
-
-Pay special attention to the master agreement details. Look for the full formal name of the master agreement, which is typically mentioned in phrases like "subject to the terms of the [FULL AGREEMENT NAME] between Purchaser and Contractor dated [DATE]". The msaName should include the complete title of the agreement (e.g., "Master Professional Services Agreement" or "Master Consulting Agreement").
-"""
-
-    else:
-        extraction_fields = """
-Extract any key information you can find, including:
-- dates: Any important dates in YYYY-MM-DD format
-- parties: Names of organizations involved
-- references: Any contract or document references
-- amounts: Any monetary amounts mentioned
-- terms: Key terms or conditions
-"""
-
-
-    
-    # Limit document text to avoid token limits
-    max_text_length = 50000
-    if len(document_text) > max_text_length:
-        document_text = document_text[:max_text_length] + "... [document truncated]"
-    
-    return base_prompt.format(
-        document_type=document_type,
-        extraction_fields=extraction_fields,
-        document_text=document_text
-    )
 
 def parse_extraction_response(response_text):
-    """Parse Claude's JSON response safely"""
+    """Parse the AI extraction response into a structured format"""
     try:
-        # Find JSON object in response text
-        json_pattern = r'```json\s*([\s\S]*?)\s*```'
-        json_match = re.search(json_pattern, response_text)
+        # Find JSON content in the response
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
         
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            # If no code block, try to find JSON directly
-            # Look for the first { and the last }
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}')
-            
-            if start_idx >= 0 and end_idx > start_idx:
-                json_str = response_text[start_idx:end_idx+1]
-            else:
-                print("[parse_extraction] No JSON object found in response")
-                return {}
+        if json_start == -1 or json_end == 0:
+            print("[extract] No valid JSON found in response")
+            return {"error": "Failed to extract structured data"}
         
-        return json.loads(json_str)
-    except Exception as e:
-        print(f"[parse_extraction] Error parsing JSON response: {str(e)}")
-        print(f"[parse_extraction] Raw response: {response_text}")
-        # Return empty dict rather than fail
-        return {}
+        json_content = response_text[json_start:json_end]
+        
+        # Parse the JSON
+        extracted_data = json.loads(json_content)
+        
+        return extracted_data
     
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
+    except json.JSONDecodeError as e:
+        print(f"[extract] JSON decode error: {str(e)}")
+        print(f"[extract] Response text: {response_text}")
+        return {"error": f"Failed to parse extraction response: {str(e)}"}
+
+
   
   
   
@@ -1060,56 +1586,73 @@ def extract_rate_card():
             return jsonify({"error": "No file uploaded"}), 400
             
         file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+            
+        # Get form parameters
         card_type = request.form.get('cardType', 'standalone')
-        provider_id = request.form.get('providerId', 'new')
+        provider_id = request.form.get('providerId')
+        customer_id = request.form.get('customerId')
+        master_agreement_id = request.form.get('masterAgreementId')
         
         print(f"[extract_rate_card] Processing {card_type} rate card: {file.filename}")
         
         # Save the file temporarily
         temp_path = save_temp_file(file)
-        
-        # Extract text based on file type
         file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
         
         # Process initial batch of rate items based on file type and card type
         try:
-            initial_rates = extract_initial_rate_batch()
-            estimated_total = estimate_total_entries()
+            initial_rates = []
+            estimated_total = 0
+            column_info = []
             
+            if file_ext in ['xlsx', 'xls']:
+                # Use our hardcoded approach for Excel files
+                initial_rates, estimated_total, column_info = extract_rates_from_excel(temp_path)
+            elif file_ext == 'pdf':
+                    print("I am here for a brief moment, and then off:)")
+                    initial_rates, estimated_total, column_info = extract_rates_from_amendment_pdf(temp_path)
+               
+            elif file_ext == 'csv':
+                initial_rates, estimated_total, column_info = extract_rates_from_csv(temp_path)
+            else:
+                return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
+                
             print(f"[extract_rate_card] Extracted {len(initial_rates)} rate items (estimated total: {estimated_total})")
         except Exception as e:
             print(f"[extract_rate_card] Error extracting rate items: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
+            traceback.print_exc()
             initial_rates = []
             estimated_total = 0
-        
+            column_info = []
+            
         # Store file path in session for later processing
         session['pending_rate_card'] = {
             'file_path': temp_path,
             'file_ext': file_ext,
             'card_type': card_type,
-            'processed': False,
-            'provider_id': provider_id
+            'provider_id': provider_id,
+            'customer_id': customer_id,
+            'master_agreement_id': master_agreement_id,
+            'column_info': column_info,
+            'processed': False
         }
         
         print("====== EXTRACT RATE CARD ENDPOINT COMPLETE ======\n")
         return jsonify({
             'previewItems': initial_rates,
-            'estimatedTotal': estimated_total
+            'estimatedTotal': estimated_total,
+            'columnInfo': column_info
         })
         
     except Exception as e:
-        import traceback
+        traceback.print_exc()
         print("\n====== ERROR IN EXTRACT RATE CARD ENDPOINT ======")
         print(f"Exception: {str(e)}")
-        print(f"Traceback: {traceback.format_exc()}")
         print("=========================================\n")
         
         return jsonify({"error": f"Error extracting rate card: {str(e)}"}), 500
-
-
-
 
 
 
@@ -1190,3 +1733,251 @@ def process_complete_rate_card():
     finally:
         cursor.close()
         conn.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@schema_blueprint.route('/api/complete_supplier_configuration', methods=['POST'])
+def complete_supplier_configuration():
+    """
+    Creates or updates a supplier (provider) and its related data in the database.
+    This includes the provider record, master agreement, amendments, and rate card items.
+    """
+    try:
+        # Get JSON data from request
+        data = request.json
+        
+        if not data:
+            return jsonify({"success": False, "error": "No data provided"}), 400
+        
+        # Extract data components
+        provider_data = data.get("providerData", {})
+        relationship_data = data.get("relationshipData", {})
+        rate_items = data.get("rateItems", [])
+        
+        # Start a database transaction - we want all operations to succeed or fail together
+        db_conn = get_db_connection()
+        cursor = db_conn.cursor()
+        
+        try:
+            # 1. Insert into providers table
+            provider_id = None
+            
+            # Check if customer_id exists (from Hawkeye)
+            customer_id = 3  # Hardcoded to Hawkeye's ID for now
+            cursor.execute(
+                "SELECT id FROM public.customers WHERE id = %s",
+                (customer_id,)
+            )
+            if not cursor.fetchone():
+                raise Exception(f"Customer with ID {customer_id} not found")
+            
+            # Insert into providers table
+            cursor.execute("""
+                INSERT INTO public.providers (
+                    provider_id,
+                    name, 
+                    category, 
+                    agreement_type,
+                    status,
+                    website,
+                    customer_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                f"GUN{int(time.time())}",  # Generate a provider_id
+                provider_data.get("name", "Gunther"),
+                provider_data.get("category", "Service Provider"),
+                provider_data.get("agreementType", "MSA"),
+                provider_data.get("status", "Active"),
+                provider_data.get("website", ""),
+                customer_id
+            ))
+            
+            provider_id = cursor.fetchone()[0]
+            
+            # 2. Insert master agreement
+            master_agreement = relationship_data.get("masterAgreement", {})
+            cursor.execute("""
+                INSERT INTO public.master_agreements (
+                    reference_number,
+                    effective_date,
+                    expiration_date,
+                    agreement_type,
+                    provider_id,
+                    customer_id
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                master_agreement.get("referenceNumber", provider_data.get("msaReference", "")),
+                master_agreement.get("effectiveDate", provider_data.get("effectiveDate", None)),
+                master_agreement.get("expirationDate", provider_data.get("termEndDate", None)), 
+                master_agreement.get("agreementType", provider_data.get("agreementType", "MSA")),
+                provider_id,
+                customer_id
+            ))
+            
+            master_agreement_id = cursor.fetchone()[0]
+            
+            # 3. Insert amendment if present
+            amendment_id = None
+            amendment = relationship_data.get("amendment")
+            if amendment:
+                cursor.execute("""
+                    INSERT INTO public.amendments (
+                        number,
+                        reference_number,
+                        effective_date,
+                        key_changes,
+                        master_agreement_id
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    amendment.get("number", ""),
+                    amendment.get("referenceNumber", ""),
+                    amendment.get("effectiveDate", None),
+                    amendment.get("keyChanges", ""),
+                    master_agreement_id
+                ))
+                amendment_id = cursor.fetchone()[0]
+            
+            # 4. Insert rate card
+            rate_card = relationship_data.get("rateCard", {})
+            cursor.execute("""
+                INSERT INTO public.rate_cards (
+                    effective_date,
+                    expiration_date,
+                    provider_id,
+                    customer_id,
+                    master_agreement_id
+                ) VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                rate_card.get("effectiveDate", None),
+                rate_card.get("expirationDate", None),
+                provider_id,
+                customer_id,
+                master_agreement_id
+            ))
+            
+            rate_card_id = cursor.fetchone()[0]
+            
+            # 5. Insert rate items
+            processed_rates = 0
+            if rate_items and len(rate_items) > 0:
+                for item in rate_items:
+                    cursor.execute("""
+                        INSERT INTO public.rate_items (
+                            title,
+                            description, 
+                            rate_type,
+                            unit_price,
+                            unit,
+                            currency,
+                            rate_card_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        item.get("title", ""),
+                        item.get("description", ""),
+                        item.get("rateType", "Hourly"),
+                        item.get("unitPrice", 0),
+                        item.get("unit", "Hour"),
+                        item.get("currency", "USD"),
+                        rate_card_id
+                    ))
+                    processed_rates += 1
+            
+            # Commit the transaction
+            db_conn.commit()
+            
+            # Successful response
+            return jsonify({
+                "success": True,
+                "providerId": provider_id,
+                "relationshipId": master_agreement_id,
+                "rateCardId": rate_card_id,
+                "totalProcessed": processed_rates,
+                "message": "Configuration saved successfully"
+            }), 201
+            
+        except Exception as e:
+            # Roll back transaction on error
+            db_conn.rollback()
+            raise e
+        
+        finally:
+            # Close cursor and connection
+            cursor.close()
+            db_conn.close()
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

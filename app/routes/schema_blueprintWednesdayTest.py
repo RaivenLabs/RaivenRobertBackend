@@ -202,143 +202,114 @@ def save_temp_file(file):
 
 
 
-
-
-
-
-
-
-
-def extract_rates_from_amendment_pdf(pdf_path, max_items=500):
-    """Extract rate card data from a PDF amendment using AI assistance"""
-    try:
-        import PyPDF2
+def extract_rates_from_amendment_pdfhold(pdf_path, max_items=100):
+    """Extract rate card data from a PDF amendment"""
+    """try:
+        # 1. Use PyPDF2 to extract text and find the rate card section
+       # rate_page_start = find_rate_card_section(pdf_path)
         
-        print(f"[extract_rates_from_amendment_pdf] Processing PDF: {pdf_path}")
+        # 2. Use Tabula or another PDF table extraction library to extract the tables
+       # tables = extract_tables_from_pdf(pdf_path, pages=f"{rate_page_start}-end")
         
-        # 1. Read the PDF content
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        pdf_text = ""
+        # 3. Process the extracted tables into a structured format
+        rate_items = []
+        total_count = 0
+        column_info = []
         
-        # Extract text from all pages
-        for page_num in range(len(pdf_reader.pages)):
-            page_text = pdf_reader.pages[page_num].extract_text()
-            pdf_text += f"\n\n--- PAGE {page_num + 1} ---\n\n{page_text}"
-        
-        # 2. Prepare prompt for Claude to extract the rate table
-        prompt = f"""
-You are a specialized data extraction assistant focused on extracting rate card tables from contract amendments.
-
-I need you to extract the rate card table data from the following PDF content. This is from a contract amendment between NIKE and a consulting firm.
-
-Look for sections titled "Exhibit B-1", "CONTRACTOR'S RATES", or similar. The table will have columns like Beeline Job Code, Job Title, and various regional bill rates.
-
-Extract all rows from the rate card table and return them in a structured format.
-
-Return your response as a JSON object with the following structure:
-{{
-  "rateItems": [
-    {{
-      // Include fields for EVERY column found in the rate table
-      // The below are just examples - use the actual column names from the document
-      // Convert column names to camelCase or snake_case for consistency
-      "job_code": "B9071",  // or whatever field contains the job/role code
-      "job_title": "Agile Lead 1",  // or whatever field contains the job/role title
-      "us_region1_rate": 155.00,  // Numeric values should be actual numbers, not strings with $ signs
-      // Include ALL other rate columns found in the table
-    }},
-    // Include ALL rows from the rate table
-  ],
-  "totalCount": 123,  // Total number of rate items found
-  "columnInfo": [
-    // Include an entry for EVERY column found in the rate table
-    {{
-      "original_name": "The exact column name as it appears in the document",
-      "sql_column": "a_valid_sql_column_name",  // Convert to snake_case with only alphanumeric and underscore
-      "sql_type": "TEXT",  // Use "TEXT", "NUMERIC(15,2)", or "DATE" as appropriate
-      "mapping": "job_code"  // A suggested standard mapping if this appears to be a common field
-    }},
-    // One entry for each column
-  ]
-}}
-
-IMPORTANT: 
-1. Your response structure should ADAPT to match ALL columns found in the actual document
-2. Do NOT limit yourself to just the example fields shown above
-3. Include ALL rows from the rate table in your response
-4. Make sure numeric values are actual numbers, not strings with currency symbols
-5. For "sql_column", ensure names are valid for SQL (letters, numbers, underscores only)
-6. If a value contains a dollar sign ($), remove it and convert to a numeric value
-
-Here is the extracted PDF content:
-
-{pdf_text[:50000]}  # Truncate if needed
-"""
-        
-        print("[extract_rates_from_amendment_pdf] Calling Claude to extract rate table")
-        
-        # 3. Call Claude to extract the rate table
-        response = anthropic_client.messages.create(
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=100000,  # Large max_tokens to handle many rate items
-            temperature=0.0,    # Use 0 for deterministic extraction
-            messages=[
-                {"role": "user", "content": prompt}
-            ]
-        )
-        
-        # 4. Parse Claude's response
-        extraction_result = {}
-        try:
-            # Extract the JSON response
-            response_text = response.content[0].text
+        #if tables:
+            # Find the table with rate information
+            #rate_table = identify_rate_table(tables)
             
-            # Look for JSON block
-            import re
-            import json
+            # Extract column headers
+            #headers = extract_column_headers(rate_table)
+            column_info = generate_column_info(headers)
             
-            json_pattern = r'```json\s*([\s\S]*?)\s*```'
-            json_match = re.search(json_pattern, response_text)
-            
-            if json_match:
-                extraction_result = json.loads(json_match.group(1))
-            else:
-                # Try to extract JSON directly if no code block
-                json_start = response_text.find('{')
-                json_end = response_text.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    extraction_result = json.loads(response_text[json_start:json_end])
-                else:
-                    print("[extract_rates_from_amendment_pdf] Failed to extract JSON from Claude response")
-        except Exception as e:
-            print(f"[extract_rates_from_amendment_pdf] Error parsing Claude response: {str(e)}")
-            traceback.print_exc()
-            return [], 0, []
-        
-        # 5. Extract rate items and column info
-        rate_items = extraction_result.get('rateItems', [])
-        total_count = extraction_result.get('totalCount', len(rate_items))
-        column_info = extraction_result.get('columnInfo', [])
-        
-        # Limit the number of preview items if needed
-        preview_items = rate_items[:max_items]
-        
-        print(f"[extract_rates_from_amendment_pdf] Extracted {len(preview_items)} preview items out of {total_count} total")
-        
-        # 6. Print sample rows for verification
-        print("\n==== CONFIRMING EXTRACTION BY CLAUDETTE! ====")
-     
-        
-        print("Yay:)")
-        
-        print("============================================\n")
-        
-        return preview_items, total_count, column_info
+            # Process rate items
+            for row in rate_table[1:]:  # Skip header row
+                if len(rate_items) < max_items:
+                    rate_item = create_rate_item(row, headers)
+                    rate_items.append(rate_item)
+                total_count += 1
+                
+        return rate_items, total_count, column_info
         
     except Exception as e:
         print(f"Error extracting rates from PDF: {str(e)}")
         traceback.print_exc()
-        return [], 0, []
+        # Fall back to LLM-based extraction if needed
+        return [], 0, []"""
+
+
+
+
+
+
+
+
+
+def extract_rates_from_amendment_pdf(pdf_path, max_items=100):
+    """
+    Extract rate card data from a PDF amendment
+    Returns: (list of rate items, estimated total number of items)
+    """
+    rate_items = []
+    pdf_reader = PyPDF2.PdfReader(pdf_path)
+    
+    # Find the rate card section in the document
+    rate_card_start_page = None
+    for i, page in enumerate(pdf_reader.pages):
+        text = page.extract_text()
+        if "CONTRACTOR'S RATES" in text or "Exhibit \"B-1\"" in text or "Exhibit B-1" in text:
+            rate_card_start_page = i
+            break
+    
+    if rate_card_start_page is None:
+        print("[extract_rates_from_amendment_pdf] Could not find rate card section")
+        return [], 0
+    
+    # Extract rate card data
+    # The pattern looks for rows in the rate table with role code, title and rates
+    rate_pattern = re.compile(r'(B\d{4})\s+(.*?)\s+\$\s*(\d+\.\d{2})\s+\$\s*(\d+\.\d{2})\s+\$\s*(\d+\.\d{2})')
+    
+    all_text = ""
+    for i in range(rate_card_start_page, len(pdf_reader.pages)):
+        all_text += pdf_reader.pages[i].extract_text()
+    
+    matches = rate_pattern.finditer(all_text)
+    count = 0
+    
+    for match in matches:
+        if count >= max_items:
+            break
+            
+        code = match.group(1)
+        title = match.group(2).strip()
+        us_region1 = float(match.group(3))
+        us_region2 = float(match.group(4))
+        us_region3 = float(match.group(5))
+        
+        rate_item = {
+            'role_code': code,
+            'role_title': title,
+            'us_region1_rate': us_region1,
+            'us_region2_rate': us_region2,
+            'us_region3_rate': us_region3,
+            # Additional rates could be added here as needed
+        }
+        
+        rate_items.append(rate_item)
+        count += 1
+    
+    # Estimate total number of entries
+    total_entries = len(rate_pattern.findall(all_text))
+    
+    return rate_items, total_entries
+
+def extract_rates_from_pdf(pdf_path, max_items=100):
+    """Extract rates from a standalone rate card PDF"""
+    # For a standalone PDF with just rates, the logic would be simpler
+    # For now, we'll use the same function as the amendment
+    return extract_rates_from_amendment_pdf(pdf_path, max_items)
 
 
 
@@ -352,61 +323,75 @@ Here is the extracted PDF content:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def extract_rates_from_excel(excel_path, sheet_name=None, max_items=100):
-    """Extract rates from an Excel file using heuristics to find the header row"""
+def extract_rates_from_excel(excel_path, max_items=100):
+    """Extract rates from an Excel file using heuristics to find the right sheet and header row"""
     if not pandas_available:
         print("[extract_rates_from_excel] Pandas not available")
         return [], 0, []
         
     try:
-        # If we don't have explicit guidance, use hardcoded values for your specific file
-        if sheet_name is None:
-            sheet_name = "Rate Card"  # Hardcoded sheet name
-            
-        print(f"[extract_rates_from_excel] Using sheet: {sheet_name}")
-        
-        # Get available sheets for debugging
+        # Get list of sheet names
         xls = pd.ExcelFile(excel_path)
-        print(f"[extract_rates_from_excel] Available sheets: {xls.sheet_names}")
+        sheet_names = xls.sheet_names
+        print(f"[extract_rates_from_excel] Available sheets: {sheet_names}")
         
-        # Read the Excel file with specified sheet
-        df = pd.read_excel(excel_path, sheet_name=sheet_name)
+        # First try: Look for sheets with "rate" or "role" in the name
+        rate_card_sheet = None
+        for sheet in sheet_names:
+            sheet_lower = sheet.lower()
+            if any(term in sheet_lower for term in ['rate', 'rate card', 'ratecard', 'pricing', 'cost']):
+                rate_card_sheet = sheet
+                print(f"[extract_rates_from_excel] Found likely rate sheet by name: {sheet}")
+                break
+                
+        # Second try: If no obvious sheet name, check content of each sheet
+        if rate_card_sheet is None:
+            print("[extract_rates_from_excel] No obvious rate sheet name found, analyzing content...")
+            best_score = 0
+            best_sheet = None
+            
+            for sheet in sheet_names:
+                try:
+                    # Read a sample of the sheet to analyze
+                    df_sample = pd.read_excel(excel_path, sheet_name=sheet, nrows=20)
+                    
+                    # Look for rate card indicators in the content
+                    rate_terms = ['role', 'level', 'rate', 'region', 'usd', 'eur']
+                    score = 0
+                    
+                    # Check cell values for rate card terms
+                    for term in rate_terms:
+                        for col in df_sample.columns:
+                            values = [str(v).lower() for v in df_sample[col].values if pd.notna(v)]
+                            if any(term in v for v in values):
+                                score += 1
+                                
+                    # Check if numerical columns exist (likely rates)
+                    numeric_cols = df_sample.select_dtypes(include=['number']).columns
+                    if len(numeric_cols) > 3:  # Rate cards typically have multiple rate columns
+                        score += 5
+                        
+                    print(f"[extract_rates_from_excel] Sheet '{sheet}' score: {score}")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_sheet = sheet
+                except Exception as e:
+                    print(f"[extract_rates_from_excel] Error analyzing sheet '{sheet}': {str(e)}")
+                    continue
+                    
+            if best_score >= 3 and best_sheet:  # Minimum threshold for confidence
+                rate_card_sheet = best_sheet
+                print(f"[extract_rates_from_excel] Selected sheet by content analysis: {best_sheet} (score: {best_score})")
+            
+        # If we still don't have a sheet, use the last one
+        if rate_card_sheet is None and sheet_names:
+            rate_card_sheet = sheet_names[-1]
+            print(f"[extract_rates_from_excel] Falling back to last sheet: {rate_card_sheet}")
+            
+        # Read the selected sheet
+        print(f"[extract_rates_from_excel] Using sheet: {rate_card_sheet}")
+        df = pd.read_excel(excel_path, sheet_name=rate_card_sheet)
         print(f"[extract_rates_from_excel] Read dataframe with shape: {df.shape}")
         
         # Find the header row using heuristics
@@ -426,7 +411,7 @@ def extract_rates_from_excel(excel_path, sheet_name=None, max_items=100):
         df = pd.DataFrame(df.values[header_row+1:], columns=headers)
         print(f"[extract_rates_from_excel] After header adjustment, shape: {df.shape}")
         
-        # Clean column names and continue processing as before...
+        # The rest of the function remains the same...
         df.columns = [str(col).strip() if pd.notna(col) else f"column_{i}" 
                      for i, col in enumerate(df.columns)]
         
@@ -1491,9 +1476,10 @@ def extract_rate_card():
                 # Use our hardcoded approach for Excel files
                 initial_rates, estimated_total, column_info = extract_rates_from_excel(temp_path)
             elif file_ext == 'pdf':
-              
+                if card_type == 'amendment':
                     initial_rates, estimated_total, column_info = extract_rates_from_amendment_pdf(temp_path)
-               
+                else:
+                    initial_rates, estimated_total, column_info = extract_rates_from_pdf(temp_path)
             elif file_ext == 'csv':
                 initial_rates, estimated_total, column_info = extract_rates_from_csv(temp_path)
             else:
@@ -1613,587 +1599,3 @@ def process_complete_rate_card():
     finally:
         cursor.close()
         conn.close()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def extract_rates_from_amendment_pdfhold(pdf_path, max_items=100):
-    """Extract rate card data from a PDF amendment"""
-    try:
-        # Import PDF processing libraries
-        import PyPDF2
-        import re
-        import tabula
-        import pandas as pd
-        import numpy as np
-        
-        print(f"[extract_rates_from_amendment_pdf] Processing PDF: {pdf_path}")
-        
-        # 1. Find the rate card section in the PDF
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        rate_card_start_page = None
-        rate_card_markers = ["CONTRACTOR'S RATES", "Exhibit \"B-1\"", "Exhibit B-1", "RATES"]
-        
-        for i in range(len(pdf_reader.pages)):
-            text = pdf_reader.pages[i].extract_text()
-            if any(marker in text for marker in rate_card_markers):
-                rate_card_start_page = i + 1  # Pages are 1-indexed in tabula
-                print(f"[extract_rates_from_amendment_pdf] Found rate card on page {rate_card_start_page}")
-                break
-                
-        if rate_card_start_page is None:
-            print("[extract_rates_from_amendment_pdf] Could not find rate card section")
-            return [], 0, []
-            
-        # 2. Extract tables from the rate card pages
-        all_tables = []
-        current_page = rate_card_start_page
-        
-        while current_page <= len(pdf_reader.pages):
-            try:
-                # Try to extract tables from the current page
-                tables = tabula.read_pdf(pdf_path, pages=current_page, multiple_tables=True)
-                
-                if tables:
-                    # Check if any table looks like a rate table (has "$" or numbers)
-                    for table in tables:
-                        if not table.empty and table.shape[1] >= 3:  # At least 3 columns
-                            # Look for "$" or number patterns to confirm it's a rate table
-                            table_str = table.to_string()
-                            if "$" in table_str or re.search(r'\d+\.\d{2}', table_str):
-                                all_tables.append(table)
-                                print(f"[extract_rates_from_amendment_pdf] Found rate table on page {current_page} with shape {table.shape}")
-                
-                # Check the next page
-                current_page += 1
-                
-                # Stop if we've processed 10 pages past the start (to avoid unnecessary processing)
-                if current_page > rate_card_start_page + 10:
-                    break
-                    
-            except Exception as e:
-                print(f"[extract_rates_from_amendment_pdf] Error processing page {current_page}: {str(e)}")
-                current_page += 1
-                
-        if not all_tables:
-            print("[extract_rates_from_amendment_pdf] No rate tables found")
-            return [], 0, []
-            
-        # 3. Process and combine the extracted tables
-        combined_df = None
-        
-        for table in all_tables:
-            # Clean up table - drop rows where all cells are empty or NaN
-            table = table.dropna(how='all')
-            
-            # Check for header rows
-            for i, row in table.iterrows():
-                row_values = [str(val).lower() for val in row if pd.notna(val)]
-                if any("job code" in val or "beeline" in val for val in row_values):
-                    # Use this as the header row
-                    headers = row
-                    table = pd.DataFrame(table.values[i+1:], columns=headers)
-                    break
-            
-            # Append to combined table
-            if combined_df is None:
-                combined_df = table
-            else:
-                # Try to append the table to the combined one
-                try:
-                    # Make sure columns match
-                    table.columns = combined_df.columns[:len(table.columns)]
-                    combined_df = pd.concat([combined_df, table], ignore_index=True)
-                except Exception as e:
-                    print(f"[extract_rates_from_amendment_pdf] Error combining tables: {str(e)}")
-        
-        if combined_df is None or combined_df.empty:
-            print("[extract_rates_from_amendment_pdf] Failed to process rate tables")
-            return [], 0, []
-            
-        # 4. Generate column info for database table creation
-        column_info = []
-        for i, column in enumerate(combined_df.columns):
-            col_name = str(column).strip() if pd.notna(column) else f"column_{i}"
-            if not col_name or col_name.lower() == 'nan':
-                col_name = f"column_{i}"
-                
-            # Sanitize for SQL
-            sql_column = re.sub(r'[^\w]', '_', col_name.lower()).strip('_')
-            if not sql_column:
-                sql_column = f"column_{i}"
-                
-            # Clean up common patterns in rate card columns
-            sql_column = sql_column.replace('__', '_')
-            
-            # Ensure uniqueness
-            base_name = sql_column
-            counter = 1
-            while any(info['sql_column'] == sql_column for info in column_info):
-                sql_column = f"{base_name}_{counter}"
-                counter += 1
-                
-            # Determine data type
-            sample_values = combined_df[column].dropna().head(5).values.tolist() if len(combined_df[column].dropna()) > 0 else []
-            
-            sql_type = 'TEXT'  # Default
-            if sample_values:
-                # Check if it's likely a numeric field (e.g., rate amount)
-                if all(isinstance(val, (int, float, np.integer, np.floating)) or 
-                       (isinstance(val, str) and re.match(r'^\$?\s*\d+\.?\d*$', val)) 
-                       for val in sample_values if pd.notna(val)):
-                    sql_type = 'NUMERIC(15,2)'
-                elif all(isinstance(val, (datetime.date, datetime.datetime)) for val in sample_values if pd.notna(val)):
-                    sql_type = 'DATE'
-                    
-            column_info.append({
-                'original_name': col_name,
-                'sql_column': sql_column,
-                'sql_type': sql_type
-            })
-        
-        print(f"[extract_rates_from_amendment_pdf] Generated {len(column_info)} column definitions")
-        
-        # 5. Extract the rate items
-        rate_items = []
-        for i, row in combined_df.head(max_items).iterrows():
-            # Skip rows that don't look like rate data
-            if all(pd.isna(val) or str(val).strip() == '' for val in row):
-                continue
-                
-            # Create rate item
-            rate_item = {}
-            for j, col in enumerate(combined_df.columns):
-                if j >= len(column_info):
-                    continue
-                    
-                col_name = column_info[j]['original_name']
-                value = row.iloc[j] if j < len(row) else None
-                
-                # Process the value
-                if pd.isna(value):
-                    rate_item[col_name] = None
-                elif isinstance(value, (int, np.integer)):
-                    rate_item[col_name] = int(value)
-                elif isinstance(value, (float, np.floating)):
-                    rate_item[col_name] = float(value)
-                elif isinstance(value, (datetime.date, datetime.datetime)):
-                    rate_item[col_name] = value.isoformat()
-                elif isinstance(value, str) and '$' in value:
-                    # Handle dollar amounts in string form
-                    clean_value = value.replace('$', '').replace(',', '').strip()
-                    try:
-                        rate_item[col_name] = float(clean_value)
-                    except ValueError:
-                        rate_item[col_name] = value
-                else:
-                    rate_item[col_name] = str(value).strip()
-            
-            # Add the item if it has data
-            if any(val is not None and val != '' for val in rate_item.values()):
-                rate_items.append(rate_item)
-        
-        total_count = len(combined_df)
-        print(f"[extract_rates_from_amendment_pdf] Processed {len(rate_items)} preview items out of {total_count} total")
-        
-        # Try to identify key fields for mapping
-        for item in column_info:
-            lower_name = item['original_name'].lower()
-            # Tag important fields for database mapping
-            if any(term in lower_name for term in ['code', 'beeline', 'job code']):
-                item['mapping'] = 'job_code'
-            elif any(term in lower_name for term in ['title', 'job title', 'role']):
-                item['mapping'] = 'job_title'
-            elif any(term in lower_name for term in ['level']):
-                item['mapping'] = 'job_level'
-            elif any(term in lower_name for term in ['region 1', 'us region 1']):
-                item['mapping'] = 'us_region1_rate'
-            elif any(term in lower_name for term in ['region 2', 'us region 2']):
-                item['mapping'] = 'us_region2_rate'
-            elif any(term in lower_name for term in ['region 3', 'us region 3']):
-                item['mapping'] = 'us_region3_rate'
-             
-             
-             
-                
-        print("\n==== SAMPLE COMPLETE ROWS FROM EXTRACTION ====")
-        sample_roles = ["Agile Lead 3", "Architect - Application 3", "Engagement Manager", "Data Analyst 3", "Consultant - IT"]
-        sample_count = 0
-
-        for item in rate_items:
-            for role_name in sample_roles:
-                if role_name.lower() in str(item).lower() and sample_count < 5:
-                    print(f"\nROLE: {role_name}")
-                    for key, value in item.items():
-                        print(f"  {key}: {value}")
-                    sample_count += 1
-                    break
-        print("============================================\n")         
-                
-        return rate_items, total_count, column_info
-        
-    except Exception as e:
-        print(f"Error extracting rates from PDF: {str(e)}")
-        traceback.print_exc()
-        return [], 0, []
-
-# Helper function for Python environments without tabula
-def extract_rates_from_pdf_using_native(pdf_path, max_items=100):
-    """Fallback PDF extraction using just PyPDF2 and regex when tabula is not available"""
-    try:
-        import PyPDF2
-        import re
-        
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        
-        # Find rate card pages
-        rate_card_start_page = None
-        for i in range(len(pdf_reader.pages)):
-            text = pdf_reader.pages[i].extract_text()
-            if "CONTRACTOR'S RATES" in text or "Exhibit B-1" in text:
-                rate_card_start_page = i
-                break
-        
-        if rate_card_start_page is None:
-            return [], 0, []
-            
-        # Extract text from rate card pages
-        all_text = ""
-        for i in range(rate_card_start_page, len(pdf_reader.pages)):
-            all_text += pdf_reader.pages[i].extract_text() + "\n"
-            
-        # Use regex to find rate entries
-        # Pattern looks for: code, title, and dollar amounts
-        rate_pattern = re.compile(r'(B\d{4})\s+([\w\s\-]+?)\s+\$\s*(\d+\.\d{2})\s+\$\s*(\d+\.\d{2})\s+\$\s*(\d+\.\d{2})')
-        
-        matches = rate_pattern.finditer(all_text)
-        
-        rate_items = []
-        match_count = 0
-        
-        for match in matches:
-            if match_count >= max_items:
-                break
-                
-            code = match.group(1)
-            title = match.group(2).strip()
-            us_region1 = float(match.group(3))
-            us_region2 = float(match.group(4))
-            us_region3 = float(match.group(5))
-            
-            rate_item = {
-                'job_code': code,
-                'job_title': title,
-                'us_region1_rate': us_region1,
-                'us_region2_rate': us_region2,
-                'us_region3_rate': us_region3
-            }
-            
-            rate_items.append(rate_item)
-            match_count += 1
-        
-        # Generate column info
-        column_info = [
-            {'original_name': 'job_code', 'sql_column': 'job_code', 'sql_type': 'TEXT', 'mapping': 'job_code'},
-            {'original_name': 'job_title', 'sql_column': 'job_title', 'sql_type': 'TEXT', 'mapping': 'job_title'},
-            {'original_name': 'us_region1_rate', 'sql_column': 'us_region1_rate', 'sql_type': 'NUMERIC(15,2)', 'mapping': 'us_region1_rate'},
-            {'original_name': 'us_region2_rate', 'sql_column': 'us_region2_rate', 'sql_type': 'NUMERIC(15,2)', 'mapping': 'us_region2_rate'},
-            {'original_name': 'us_region3_rate', 'sql_column': 'us_region3_rate', 'sql_type': 'NUMERIC(15,2)', 'mapping': 'us_region3_rate'}
-        ]
-        
-        # Count total matches for estimation
-        total_matches = len(re.findall(r'B\d{4}', all_text))
-        
-                # Add this after line 118 (after processing the data but before returning it)
-        # This will print complete row details for 5 sample roles
-        print("\n==== SAMPLE COMPLETE ROWS FROM EXTRACTION ====")
-        sample_roles = ["Agile Lead 3", "Architect - Application 3", "Engagement Manager", "Data Analyst 3", "Consultant - IT"]
-        sample_count = 0
-
-        for item in rate_items:
-            for role_name in sample_roles:
-                if role_name.lower() in str(item).lower() and sample_count < 5:
-                    print(f"\nROLE: {role_name}")
-                    for key, value in item.items():
-                        print(f"  {key}: {value}")
-                    sample_count += 1
-                    break
-        print("============================================\n")
-                
-        
-        
-        return rate_items, total_matches, column_info
-        
-    except Exception as e:
-        print(f"Error in native PDF extraction: {str(e)}")
-        traceback.print_exc()
-        return [], 0, []
-    
-    
-    
-def extract_rates_from_amendment_pdfholdWednesday(pdf_path, max_items=100):
-    """Extract rate card data from a PDF amendment"""
-    try:
-        # Import PDF processing libraries
-        import PyPDF2
-        import re
-        import tabula
-        import pandas as pd
-        import numpy as np
-        
-        print(f"[extract_rates_from_amendment_pdf] Processing PDF: {pdf_path}")
-        
-        # 1. Find the rate card section in the PDF
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        rate_card_start_page = None
-        rate_card_markers = ["CONTRACTOR'S RATES", "Exhibit \"B-1\"", "Exhibit B-1", "RATES"]
-        
-        for i in range(len(pdf_reader.pages)):
-            text = pdf_reader.pages[i].extract_text()
-            if any(marker in text for marker in rate_card_markers):
-                rate_card_start_page = i + 1  # Pages are 1-indexed in tabula
-                print(f"[extract_rates_from_amendment_pdf] Found rate card on page {rate_card_start_page}")
-                break
-                
-        if rate_card_start_page is None:
-            print("[extract_rates_from_amendment_pdf] Could not find rate card section")
-            return [], 0, []
-            
-        # 2. Extract tables from the rate card pages
-        all_tables = []
-        current_page = rate_card_start_page
-        
-        while current_page <= len(pdf_reader.pages):
-            try:
-                # Try to extract tables from the current page
-                tables = tabula.read_pdf(pdf_path, pages=current_page, multiple_tables=True)
-                
-                if tables:
-                    # Check if any table looks like a rate table (has "$" or numbers)
-                    for table in tables:
-                        if not table.empty and table.shape[1] >= 3:  # At least 3 columns
-                            # Look for "$" or number patterns to confirm it's a rate table
-                            table_str = table.to_string()
-                            if "$" in table_str or re.search(r'\d+\.\d{2}', table_str):
-                                all_tables.append(table)
-                                print(f"[extract_rates_from_amendment_pdf] Found rate table on page {current_page} with shape {table.shape}")
-                
-                # Check the next page
-                current_page += 1
-                
-                # Stop if we've processed 10 pages past the start (to avoid unnecessary processing)
-                if current_page > rate_card_start_page + 10:
-                    break
-                    
-            except Exception as e:
-                print(f"[extract_rates_from_amendment_pdf] Error processing page {current_page}: {str(e)}")
-                current_page += 1
-                
-        if not all_tables:
-            print("[extract_rates_from_amendment_pdf] No rate tables found")
-            return [], 0, []
-            
-        # 3. Process and combine the extracted tables
-        combined_df = None
-        
-        for table in all_tables:
-            # Clean up table - drop rows where all cells are empty or NaN
-            table = table.dropna(how='all')
-            
-            # Check for header rows
-            for i, row in table.iterrows():
-                row_values = [str(val).lower() for val in row if pd.notna(val)]
-                if any("job code" in val or "beeline" in val for val in row_values):
-                    # Use this as the header row
-                    headers = row
-                    table = pd.DataFrame(table.values[i+1:], columns=headers)
-                    break
-            
-            # Append to combined table
-            if combined_df is None:
-                combined_df = table
-            else:
-                # Try to append the table to the combined one
-                try:
-                    # Make sure columns match
-                    table.columns = combined_df.columns[:len(table.columns)]
-                    combined_df = pd.concat([combined_df, table], ignore_index=True)
-                except Exception as e:
-                    print(f"[extract_rates_from_amendment_pdf] Error combining tables: {str(e)}")
-        
-        if combined_df is None or combined_df.empty:
-            print("[extract_rates_from_amendment_pdf] Failed to process rate tables")
-            return [], 0, []
-            
-        # 4. Generate column info for database table creation
-        column_info = []
-        for i, column in enumerate(combined_df.columns):
-            col_name = str(column).strip() if pd.notna(column) else f"column_{i}"
-            if not col_name or col_name.lower() == 'nan':
-                col_name = f"column_{i}"
-                
-            # Sanitize for SQL
-            sql_column = re.sub(r'[^\w]', '_', col_name.lower()).strip('_')
-            if not sql_column:
-                sql_column = f"column_{i}"
-                
-            # Clean up common patterns in rate card columns
-            sql_column = sql_column.replace('__', '_')
-            
-            # Ensure uniqueness
-            base_name = sql_column
-            counter = 1
-            while any(info['sql_column'] == sql_column for info in column_info):
-                sql_column = f"{base_name}_{counter}"
-                counter += 1
-                
-            # Determine data type
-            sample_values = combined_df[column].dropna().head(5).values.tolist() if len(combined_df[column].dropna()) > 0 else []
-            
-            sql_type = 'TEXT'  # Default
-            if sample_values:
-                # Check if it's likely a numeric field (e.g., rate amount)
-                if all(isinstance(val, (int, float, np.integer, np.floating)) or 
-                       (isinstance(val, str) and re.match(r'^\$?\s*\d+\.?\d*$', val)) 
-                       for val in sample_values if pd.notna(val)):
-                    sql_type = 'NUMERIC(15,2)'
-                elif all(isinstance(val, (datetime.date, datetime.datetime)) for val in sample_values if pd.notna(val)):
-                    sql_type = 'DATE'
-                    
-            column_info.append({
-                'original_name': col_name,
-                'sql_column': sql_column,
-                'sql_type': sql_type
-            })
-        
-        print(f"[extract_rates_from_amendment_pdf] Generated {len(column_info)} column definitions")
-        
-        # 5. Extract the rate items
-        rate_items = []
-        for i, row in combined_df.head(max_items).iterrows():
-            # Skip rows that don't look like rate data
-            if all(pd.isna(val) or str(val).strip() == '' for val in row):
-                continue
-                
-            # Create rate item
-            rate_item = {}
-            for j, col in enumerate(combined_df.columns):
-                if j >= len(column_info):
-                    continue
-                    
-                col_name = column_info[j]['original_name']
-                value = row.iloc[j] if j < len(row) else None
-                
-                # Process the value
-                if pd.isna(value):
-                    rate_item[col_name] = None
-                elif isinstance(value, (int, np.integer)):
-                    rate_item[col_name] = int(value)
-                elif isinstance(value, (float, np.floating)):
-                    rate_item[col_name] = float(value)
-                elif isinstance(value, (datetime.date, datetime.datetime)):
-                    rate_item[col_name] = value.isoformat()
-                elif isinstance(value, str) and '$' in value:
-                    # Handle dollar amounts in string form
-                    clean_value = value.replace('$', '').replace(',', '').strip()
-                    try:
-                        rate_item[col_name] = float(clean_value)
-                    except ValueError:
-                        rate_item[col_name] = value
-                else:
-                    rate_item[col_name] = str(value).strip()
-            
-            # Add the item if it has data
-            if any(val is not None and val != '' for val in rate_item.values()):
-                rate_items.append(rate_item)
-        
-        total_count = len(combined_df)
-        print(f"[extract_rates_from_amendment_pdf] Processed {len(rate_items)} preview items out of {total_count} total")
-        
-        # Try to identify key fields for mapping
-        for item in column_info:
-            lower_name = item['original_name'].lower()
-            # Tag important fields for database mapping
-            if any(term in lower_name for term in ['code', 'beeline', 'job code']):
-                item['mapping'] = 'job_code'
-            elif any(term in lower_name for term in ['title', 'job title', 'role']):
-                item['mapping'] = 'job_title'
-            elif any(term in lower_name for term in ['level']):
-                item['mapping'] = 'job_level'
-            elif any(term in lower_name for term in ['region 1', 'us region 1']):
-                item['mapping'] = 'us_region1_rate'
-            elif any(term in lower_name for term in ['region 2', 'us region 2']):
-                item['mapping'] = 'us_region2_rate'
-            elif any(term in lower_name for term in ['region 3', 'us region 3']):
-                item['mapping'] = 'us_region3_rate'
-             
-             
-             
-                
-        print("\n==== SAMPLE COMPLETE ROWS FROM EXTRACTION ====")
-        sample_roles = ["Agile Lead 3", "Architect - Application Niche 3", "Engagement Manager", "Data Analyst 3", "Consultant - IT"]
-        sample_count = 0
-
-        for item in rate_items:
-            for role_name in sample_roles:
-                if role_name.lower() in str(item).lower() and sample_count < 5:
-                    print(f"\nROLE: {role_name}")
-                    for key, value in item.items():
-                        print(f"  {key}: {value}")
-                    sample_count += 1
-                    break
-        print("============================================\n")         
-                
-        return rate_items, total_count, column_info
-        
-    except Exception as e:
-        print(f"Error extracting rates from PDF: {str(e)}")
-        traceback.print_exc()
-        return [], 0, []
-
-
-

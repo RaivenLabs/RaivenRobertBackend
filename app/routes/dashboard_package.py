@@ -747,32 +747,3 @@ def get_sample_dimensions(completion_score=0):
         { "name": "Deliverables", "progress": deliverables, "color": get_color(deliverables) }
     ]
 
-# =========================================
-# Test Route
-# =========================================
-
-@dashboard_package.route('/test', methods=['GET'])
-def test_dashboard_api():
-    """
-    A simple test endpoint to verify the dashboard API is working.
-    """
-    # Get database connection status
-    db_status = "connected"
-    try:
-        conn = get_db_connection()
-        if not conn:
-            db_status = "connection failed"
-        else:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-            conn.close()
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-
-    return jsonify({
-        "status": "success",
-        "message": "The dashboard API is set up and active.",
-        "database": db_status,
-        "timestamp": datetime.now().isoformat()
-    }), 200
